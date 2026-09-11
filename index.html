@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1420">
+<title>Hum Watch — overnight 100 Hz log</title>
+<style>
+  :root{
+    --ink:#0e1420;          /* deep night blue */
+    --ink-2:#151d2c;
+    --rule:#243248;
+    --text:#c3cddd;
+    --text-dim:#6f7f98;
+    --sodium:#e7a33c;       /* streetlamp amber = hum present */
+    --sodium-soft:#8a5f1c;
+    --quiet:#3f6b7a;
+    --focus:#7fb6d6;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--ink);color:var(--text)}
+  body{
+    font-family:ui-sans-serif,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    font-size:16px;line-height:1.45;
+    padding:14px 14px calc(28px + env(safe-area-inset-bottom));
+    max-width:760px;margin:0 auto;
+    -webkit-text-size-adjust:100%;
+  }
+  h1{font-size:15px;font-weight:600;letter-spacing:.01em;margin:0 0 2px;color:var(--text-dim)}
+  .sub{font-size:13px;color:var(--text-dim);margin:0 0 18px}
+
+  /* ---- state ribbon ---- */
+  .state{
+    display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+    border-top:2px solid var(--rule);padding-top:10px;margin-bottom:14px;
+    transition:border-color .4s ease;
+  }
+  .state .word{font-size:30px;font-weight:650;letter-spacing:-.02em;color:var(--quiet);transition:color .4s ease}
+  .state .since{font-size:15px;color:var(--text-dim);font-variant-numeric:tabular-nums}
+  body.on .state{border-top-color:var(--sodium)}
+  body.on .state .word{color:var(--sodium)}
+  body.idle .state .word{color:var(--text-dim)}
+
+  /* ---- timeline hero ---- */
+  .ribbon{position:relative;margin:0 0 6px}
+  canvas{display:block;width:100%;height:132px;background:var(--ink-2);border-radius:3px}
+  .axis{display:flex;justify-content:space-between;font-size:12px;color:var(--text-dim);
+        font-variant-numeric:tabular-nums;margin:5px 2px 20px}
+
+  /* ---- readouts ---- */
+  .readout{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--rule);
+           border:1px solid var(--rule);border-radius:3px;margin-bottom:18px}
+  .cell{background:var(--ink);padding:9px 10px}
+  .cell b{display:block;font-size:21px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text)}
+  .cell span{font-size:12px;color:var(--text-dim)}
+
+  /* ---- controls ---- */
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+  button{
+    font:inherit;font-size:15px;color:var(--text);background:var(--ink-2);
+    border:1px solid var(--rule);border-radius:3px;padding:11px 15px;cursor:pointer;
+  }
+  button.primary{background:var(--sodium);border-color:var(--sodium);color:#20160a;font-weight:600}
+  button:disabled{opacity:.4}
+  button:focus-visible,summary:focus-visible,input:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+  details{border-top:1px solid var(--rule);padding:12px 0}
+  summary{cursor:pointer;font-size:14px;color:var(--text-dim)}
+  .field{display:flex;align-items:center;gap:10px;margin:12px 0;font-size:14px}
+  .field label{flex:0 0 128px;color:var(--text-dim)}
+  .field input[type=number]{width:84px;background:var(--ink-2);border:1px solid var(--rule);
+    color:var(--text);border-radius:3px;padding:7px 8px;font:inherit;font-size:15px}
+  .field input[type=range]{flex:1;accent-color:var(--sodium)}
+  .field output{width:52px;text-align:right;font-variant-numeric:tabular-nums}
+
+  /* ---- log ---- */
+  h2{font-size:14px;font-weight:600;color:var(--text-dim);margin:22px 0 8px}
+  table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+  th{text-align:left;font-weight:500;color:var(--text-dim);font-size:12px;padding:0 0 6px;border-bottom:1px solid var(--rule)}
+  td{padding:7px 0;border-bottom:1px solid var(--ink-2)}
+  td.dur{color:var(--sodium)}
+  tr.gap td{color:var(--text-dim);font-style:italic}
+  .empty{color:var(--text-dim);font-size:14px;padding:14px 0}
+
+  .note{font-size:13px;color:var(--text-dim);margin:18px 0 0;border-top:1px solid var(--rule);padding-top:14px}
+  .err{color:var(--sodium);font-size:14px;margin:10px 0}
+
+  /* ---- overnight dim ---- */
+  body.dimmed>*:not(.waker){opacity:.05;transition:opacity .8s ease}
+  .waker{position:fixed;inset:0;z-index:5;display:none}
+  body.dimmed .waker{display:block}
+</style>
+</head>
+<body class="idle">
+
+<h1>Hum Watch</h1>
+<p class="sub">Listens for a steady tone and records when it starts and stops. Leave running overnight, plugged in, screen on.</p>
+
+<div class="state" aria-live="polite">
+  <span class="word" id="word">Not listening</span>
+  <span class="since" id="since"></span>
+</div>
+
+<div class="ribbon"><canvas id="tl"></canvas></div>
+<div class="axis"><span id="axL">—</span><span id="axR">—</span></div>
+
+<div class="readout">
+  <div class="cell"><b id="rTone">—</b><span id="rToneLbl">Tone at 100 Hz</span></div>
+  <div class="cell"><b id="rFloor">—</b><span>Background nearby</span></div>
+  <div class="cell"><b id="rSnr">—</b><span>How far it stands out</span></div>
+</div>
+
+<div class="row">
+  <button id="start" class="primary">Start listening</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="dim">Dim screen</button>
+</div>
+
+<div id="err" class="err" hidden></div>
+
+<details id="settings">
+  <summary>Settings</summary>
+  <div class="field">
+    <label for="freq">Tone to watch</label>
+    <input type="number" id="freq" value="100" min="20" max="1000" step="1"> Hz
+  </div>
+  <div class="field">
+    <label for="thr">Counts as present above</label>
+    <input type="range" id="thr" min="3" max="30" step="0.5" value="12">
+    <output id="thrOut">12 dB</output>
+  </div>
+  <div class="field">
+    <label for="hold">Ignore blips under</label>
+    <input type="number" id="hold" value="15" min="2" max="300" step="1"> seconds
+  </div>
+  <div class="row" style="margin:14px 0 0">
+    <button id="setHere">Set threshold from what I hear now</button>
+  </div>
+  <p class="note" style="border:0;padding:0;margin-top:12px">
+    Tap that button while the hum is audible and it will sit the threshold just under the level you're
+    hearing right now.
+  </p>
+</details>
+
+<h2>Log</h2>
+<table>
+  <thead><tr><th style="width:31%">Started</th><th style="width:31%">Ended</th><th style="width:22%">Lasted</th><th style="width:16%">Loudness</th></tr></thead>
+  <tbody id="log"></tbody>
+</table>
+<p class="empty" id="empty">Nothing recorded yet.</p>
+
+<div class="row" style="margin-top:16px">
+  <button id="csvEvents">Download log (CSV)</button>
+  <button id="csvLevels">Download levels (CSV)</button>
+  <button id="clear">Clear everything</button>
+</div>
+
+<p class="note">
+  Levels are relative, not calibrated decibels — the useful evidence here is the timing pattern and how
+  far the tone rises above the background around it. Readings are saved in this browser, so you can close
+  and reopen the page without losing the night. Keep the phone plugged in, in the same spot, and don't
+  switch away from this tab: Android and iOS stop the microphone when the page goes to the background,
+  and any interruption is marked in the log as a gap.
+</p>
+
+<div class="waker" id="waker" title="Tap to wake"></div>
+
+<script>
+(function(){
+"use strict";
+
+const K = {ev:"humwatch.events", hs:"humwatch.history", st:"humwatch.settings"};
+const $ = id => document.getElementById(id);
+
+let ctx=null, stream=null, analyser=null, buf=null, timer=null;
+let running=false, on=false, stateSince=0, cand=0, lastTick=0;
+let events=[], history=[], lastSave=0, wakeLock=null;
+let cur={tone:null, floor:null, snr:null};
+
+const S = Object.assign({freq:100, thr:12, hold:15}, load(K.st, {}));
+events = load(K.ev, []);
+history = load(K.hs, []);
+
+function load(k,d){ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch(e){ return d; } }
+function save(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+
+/* ---------- audio ---------- */
+async function start(){
+  $("err").hidden = true;
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({audio:{
+      echoCancellation:false, noiseSuppression:false, autoGainControl:false, channelCount:1
+    }});
+  }catch(e){
+    fail("No microphone. Allow mic access for this page, and note that it only works over https (GitHub Pages is fine) or on localhost.");
+    return;
+  }
+  ctx = new (window.AudioContext||window.webkitAudioContext)();
+  await ctx.resume();
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 32768;
+  analyser.smoothingTimeConstant = 0.5;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  buf = new Float32Array(analyser.frequencyBinCount);
+
+  running=true; on=false; stateSince=Date.now(); cand=0; lastTick=Date.now();
+  document.body.className="";
+  $("start").disabled=true; $("stop").disabled=false;
+  timer = setInterval(tick, 250);
+  keepAwake();
+  paint();
+}
+
+function stop(){
+  running=false;
+  clearInterval(timer);
+  if(on) closeEvent(Date.now());
+  if(stream) stream.getTracks().forEach(t=>t.stop());
+  if(ctx) ctx.close();
+  ctx=null; analyser=null; stream=null;
+  if(wakeLock){ wakeLock.release().catch(()=>{}); wakeLock=null; }
+  document.body.className="idle";
+  $("start").disabled=false; $("stop").disabled=true;
+  cur={tone:null,floor:null,snr:null};
+  flush();
+  paint();
+}
+
+function fail(msg){ const e=$("err"); e.textContent=msg; e.hidden=false; }
+
+function tick(){
+  const now = Date.now();
+  if(now - lastTick > 5000){                 // mic was suspended / tab backgrounded
+    events.push({gap:true, start:lastTick, end:now});
+    if(on){ on=false; stateSince=now; }
+    save(K.ev, events); renderLog();
+  }
+  lastTick = now;
+
+  analyser.getFloatFrequencyData(buf);
+  const hz = ctx.sampleRate / analyser.fftSize;
+  const at = f => Math.round(f/hz);
+
+  // peak in a narrow band around the target
+  let tone = -Infinity;
+  for(let i=at(S.freq-2.5); i<=at(S.freq+2.5); i++) if(buf[i]>tone) tone=buf[i];
+
+  // background: median of the shoulders either side, clear of mains harmonics
+  const side=[];
+  for(let i=at(S.freq-26); i<at(S.freq-8); i++) side.push(buf[i]);
+  for(let i=at(S.freq+8); i<at(S.freq+26); i++) side.push(buf[i]);
+  side.sort((a,b)=>a-b);
+  const floor = side.length ? side[Math.floor(side.length/2)] : -100;
+
+  const snr = tone - floor;
+  cur = {tone, floor, snr};
+
+  // hysteresis + minimum duration
+  const want = snr >= S.thr ? 1 : (snr <= S.thr - 3 ? -1 : 0);
+  if(want !== 0 && (want === 1) !== on){
+    if(!cand) cand = now;
+    if(now - cand >= S.hold*1000){
+      if(want === 1){ events.push({start:now, peak:snr, sum:snr, n:1}); on=true; }
+      else { closeEvent(now - S.hold*1000); on=false; }
+      stateSince = now - S.hold*1000;
+      cand = 0;
+      save(K.ev, events); renderLog();
+    }
+  } else cand = 0;
+
+  if(on){
+    const e = events[events.length-1];
+    if(e && !e.end){ e.sum += snr; e.n++; if(snr>e.peak) e.peak=snr; }
+  }
+
+  if(!history.length || now - history[history.length-1][0] >= 5000){
+    history.push([now, Math.round(snr*10)/10]);
+    if(history.length > 40000) history.splice(0, 5000);
+  }
+  if(now - lastSave > 20000) flush();
+
+  paint();
+}
+
+function closeEvent(t){
+  for(let i=events.length-1;i>=0;i--) if(!events[i].gap && !events[i].end){ events[i].end=t; break; }
+}
+function flush(){ save(K.hs, history); save(K.ev, events); lastSave=Date.now(); }
+
+async function keepAwake(){
+  try{ if("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); }catch(e){}
+}
+document.addEventListener("visibilitychange", ()=>{
+  if(document.visibilityState==="visible" && running){ keepAwake(); if(ctx) ctx.resume(); }
+});
+
+/* ---------- display ---------- */
+const fmtTime = t => new Date(t).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+function fmtDur(ms){
+  const s = Math.max(0, Math.round(ms/1000));
+  const h = Math.floor(s/3600), m = Math.floor(s%3600/60), r = s%60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${r}s` : `${r}s`;
+}
+
+function paint(){
+  const d = v => v==null||!isFinite(v) ? "—" : (v>0?"+":"") + v.toFixed(1);
+  $("rTone").textContent  = cur.tone==null?"—":cur.tone.toFixed(0);
+  $("rFloor").textContent = cur.floor==null?"—":cur.floor.toFixed(0);
+  $("rSnr").textContent   = cur.snr==null?"—":cur.snr.toFixed(1)+" dB";
+  $("rToneLbl").textContent = "Tone at "+S.freq+" Hz";
+
+  if(!running){
+    $("word").textContent = "Not listening";
+    $("since").textContent = events.length ? events.length+" entries saved" : "";
+  }else{
+    document.body.classList.toggle("on", on);
+    $("word").textContent = on ? "Hum present" : "Quiet";
+    $("since").textContent = "for " + fmtDur(Date.now()-stateSince);
+  }
+  drawRibbon();
+}
+
+function drawRibbon(){
+  const c = $("tl"), dpr = window.devicePixelRatio||1;
+  const w = c.clientWidth, h = c.clientHeight;
+  c.width = w*dpr; c.height = h*dpr;
+  const g = c.getContext("2d"); g.scale(dpr,dpr);
+  g.fillStyle = "#151d2c"; g.fillRect(0,0,w,h);
+
+  if(!history.length){
+    g.fillStyle="#6f7f98"; g.font="13px ui-sans-serif,system-ui,sans-serif";
+    g.fillText("The night's record builds here.", 12, h/2);
+    $("axL").textContent = "—"; $("axR").textContent = "—";
+    return;
+  }
+  const t0 = history[0][0], t1 = Math.max(Date.now(), history[history.length-1][0]);
+  const span = Math.max(t1-t0, 60000);
+  const x = t => (t-t0)/span * w;
+
+  // hour gridlines
+  g.strokeStyle="#243248"; g.lineWidth=1;
+  const first = new Date(t0); first.setMinutes(0,0,0);
+  for(let t=first.getTime(); t<=t1; t+=3600000){
+    if(t<t0) continue;
+    const px = Math.round(x(t))+.5;
+    g.beginPath(); g.moveTo(px,0); g.lineTo(px,h); g.stroke();
+    g.fillStyle="#3c4a61"; g.font="11px ui-sans-serif,system-ui,sans-serif";
+    g.fillText(new Date(t).getHours()+":00", px+4, h-6);
+  }
+
+  // threshold line
+  const top = 10, bot = h-22, scale = v => bot - Math.max(0,Math.min(1,(v)/36))*(bot-top);
+  g.strokeStyle="#8a5f1c"; g.setLineDash([3,4]);
+  g.beginPath(); g.moveTo(0, scale(S.thr)); g.lineTo(w, scale(S.thr)); g.stroke();
+  g.setLineDash([]);
+
+  // level trace
+  g.strokeStyle="#4f7f92"; g.lineWidth=1; g.beginPath();
+  for(let i=0;i<history.length;i++){
+    const px = x(history[i][0]), py = scale(history[i][1]);
+    i ? g.lineTo(px,py) : g.moveTo(px,py);
+  }
+  g.stroke();
+
+  // amber blocks for confirmed events, grey hatch for gaps
+  for(const e of events){
+    const a = x(e.start), b = x(e.end || Date.now());
+    if(e.gap){ g.fillStyle="rgba(111,127,152,.25)"; g.fillRect(a,0,Math.max(1,b-a),h); }
+    else { g.fillStyle="rgba(231,163,60,.30)"; g.fillRect(a,top-6,Math.max(2,b-a),bot-top+6);
+           g.fillStyle="#e7a33c"; g.fillRect(a,top-9,Math.max(2,b-a),3); }
+  }
+
+  $("axL").textContent = fmtTime(t0);
+  $("axR").textContent = fmtTime(t1);
+}
+
+function renderLog(){
+  const tb = $("log"); tb.innerHTML = "";
+  const rows = events.slice().reverse().slice(0,200);
+  $("empty").hidden = rows.length>0;
+  for(const e of rows){
+    const tr = document.createElement("tr");
+    if(e.gap){
+      tr.className = "gap";
+      tr.innerHTML = `<td>${fmtTime(e.start)}</td><td>${fmtTime(e.end)}</td>
+        <td colspan="2">not listening — ${fmtDur(e.end-e.start)}</td>`;
+    }else{
+      const end = e.end || Date.now();
+      tr.innerHTML = `<td>${fmtTime(e.start)}</td><td>${e.end?fmtTime(e.end):"still going"}</td>
+        <td class="dur">${fmtDur(end-e.start)}</td>
+        <td>${(e.sum/e.n).toFixed(0)} dB</td>`;
+    }
+    tb.appendChild(tr);
+  }
+}
+
+/* ---------- export ---------- */
+function download(name, text){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], {type:"text/csv"}));
+  a.download = name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+}
+const iso = t => new Date(t).toISOString();
+
+$("csvEvents").onclick = ()=>{
+  let s = "kind,start_iso,end_iso,duration_seconds,mean_snr_db,peak_snr_db,watched_hz,threshold_db\n";
+  for(const e of events){
+    const end = e.end || Date.now();
+    s += e.gap
+      ? `gap,${iso(e.start)},${iso(end)},${((end-e.start)/1000).toFixed(0)},,,${S.freq},${S.thr}\n`
+      : `hum,${iso(e.start)},${iso(end)},${((end-e.start)/1000).toFixed(0)},${(e.sum/e.n).toFixed(1)},${e.peak.toFixed(1)},${S.freq},${S.thr}\n`;
+  }
+  download("hum-log-"+new Date().toISOString().slice(0,10)+".csv", s);
+};
+$("csvLevels").onclick = ()=>{
+  let s = "iso_time,snr_db\n";
+  for(const h of history) s += iso(h[0])+","+h[1]+"\n";
+  download("hum-levels-"+new Date().toISOString().slice(0,10)+".csv", s);
+};
+$("clear").onclick = ()=>{
+  if(!confirm("Delete the saved log and levels?")) return;
+  events=[]; history=[]; flush(); renderLog(); paint();
+};
+
+/* ---------- settings ---------- */
+$("freq").onchange = e => { S.freq = Math.max(20, Math.min(1000, +e.target.value||100)); save(K.st,S); paint(); };
+$("thr").oninput   = e => { S.thr = +e.target.value; $("thrOut").textContent = S.thr+" dB"; save(K.st,S); drawRibbon(); };
+$("hold").onchange = e => { S.hold = Math.max(2, +e.target.value||15); save(K.st,S); };
+$("setHere").onclick = ()=>{
+  if(cur.snr==null || !isFinite(cur.snr)) return fail("Start listening first, then tap this while you can hear the hum.");
+  S.thr = Math.max(3, Math.round((cur.snr-4)*2)/2);
+  $("thr").value = S.thr; $("thrOut").textContent = S.thr+" dB"; save(K.st,S); drawRibbon();
+};
+$("freq").value = S.freq; $("thr").value = S.thr; $("thrOut").textContent = S.thr+" dB"; $("hold").value = S.hold;
+
+$("start").onclick = start;
+$("stop").onclick = stop;
+$("dim").onclick = ()=> document.body.classList.add("dimmed");
+$("waker").onclick = ()=> document.body.classList.remove("dimmed");
+window.addEventListener("resize", drawRibbon);
+window.addEventListener("pagehide", flush);
+
+renderLog(); paint();
+setInterval(()=>{ if(!running) return; paint(); }, 1000);
+})();
+</script>
+</body>
+</html>
