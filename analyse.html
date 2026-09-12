@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1420">
+<link rel="manifest" href="./manifest.webmanifest">
+<title>Hum Watch — analyse a recording</title>
+<style>
+  :root{--ink:#0e1420;--ink-2:#151d2c;--rule:#243248;--text:#c3cddd;--text-dim:#6f7f98;
+        --sodium:#e7a33c;--quiet:#3f6b7a;--focus:#7fb6d6}
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--ink);color:var(--text)}
+  body{font-family:ui-sans-serif,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+       font-size:16px;line-height:1.45;padding:14px 14px 40px;max-width:760px;margin:0 auto}
+  h1{font-size:15px;font-weight:600;margin:0 0 2px;color:var(--text-dim)}
+  .sub{font-size:13px;color:var(--text-dim);margin:0 0 18px}
+  .sub a{color:var(--quiet)}
+  canvas{display:block;width:100%;height:150px;background:var(--ink-2);border-radius:3px}
+  .axis{display:flex;justify-content:space-between;font-size:12px;color:var(--text-dim);
+        font-variant-numeric:tabular-nums;margin:5px 2px 20px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+  button{font:inherit;font-size:15px;color:var(--text);background:var(--ink-2);border:1px solid var(--rule);
+         border-radius:3px;padding:11px 15px;cursor:pointer}
+  button.primary{background:var(--sodium);border-color:var(--sodium);color:#20160a;font-weight:600}
+  button:disabled{opacity:.4}
+  button:focus-visible,input:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  .field{display:flex;align-items:center;gap:10px;margin:12px 0;font-size:14px;flex-wrap:wrap}
+  .field label{flex:0 0 128px;color:var(--text-dim)}
+  input[type=number],input[type=datetime-local],input[type=file]{background:var(--ink-2);
+    border:1px solid var(--rule);color:var(--text);border-radius:3px;padding:8px;font:inherit;font-size:15px}
+  input[type=number]{width:90px}
+  input[type=range]{flex:1;accent-color:var(--sodium)}
+  output{width:58px;text-align:right;font-variant-numeric:tabular-nums}
+  .bar{height:4px;background:var(--ink-2);border-radius:2px;overflow:hidden;margin:14px 0}
+  .bar i{display:block;height:100%;width:0;background:var(--sodium);transition:width .2s}
+  .status{font-size:14px;color:var(--text-dim);font-variant-numeric:tabular-nums}
+  h2{font-size:14px;font-weight:600;color:var(--text-dim);margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+  th{text-align:left;font-weight:500;color:var(--text-dim);font-size:12px;padding:0 0 6px;border-bottom:1px solid var(--rule)}
+  td{padding:7px 0;border-bottom:1px solid var(--ink-2)}
+  td.dur{color:var(--sodium)}
+  .note{font-size:13px;color:var(--text-dim);margin:22px 0 0;border-top:1px solid var(--rule);padding-top:14px}
+  .err{color:var(--sodium);font-size:14px;margin:10px 0}
+</style>
+</head>
+<body>
+
+<h1>Analyse a recording</h1>
+<p class="sub">Drop in an overnight recording and get the same log, without the phone having to stay awake. WAV is read in slices, so length doesn't matter. <a href="./">Back to live listening</a></p>
+
+<div class="field"><label for="file">Recording</label><input type="file" id="file" accept="audio/*,.wav,.m4a,.mp3,.flac,.ogg"></div>
+<div class="field"><label for="startAt">Recording started</label><input type="datetime-local" id="startAt" step="1"></div>
+<div class="field"><label for="freq">Tone to watch</label><input type="number" id="freq" value="100" min="25" max="300" step="1"> Hz</div>
+<div class="field"><label for="thr">Counts as present above</label><input type="range" id="thr" min="3" max="35" step="0.5" value="12"><output id="thrOut">12 dB</output></div>
+<div class="field"><label for="hold">Ignore blips under</label><input type="number" id="hold" value="15" min="2" max="300" step="1"> seconds</div>
+
+<div class="row"><button id="go" class="primary" disabled>Analyse</button></div>
+<div class="bar"><i id="prog"></i></div>
+<p class="status" id="status">No recording loaded.</p>
+<div id="err" class="err" hidden></div>
+
+<canvas id="tl"></canvas>
+<div class="axis"><span id="axL">—</span><span id="axR">—</span></div>
+
+<h2>Log</h2>
+<table>
+  <thead><tr><th style="width:31%">Started</th><th style="width:31%">Ended</th><th style="width:22%">Lasted</th><th style="width:16%">Loudness</th></tr></thead>
+  <tbody id="log"></tbody>
+</table>
+<p class="status" id="empty">Nothing found yet.</p>
+
+<div class="row"><button id="csvEvents" disabled>Download log (CSV)</button><button id="csvLevels" disabled>Download levels (CSV)</button></div>
+
+<p class="note">
+  Record with your phone's own voice recorder — a native app holds the microphone when the screen is off
+  and other apps are in front, which no web page can do. Uncompressed WAV is best; if your recorder only
+  makes m4a, this page will still decode it, but the whole file has to fit in memory, so do long ones on
+  a computer. Set the start time from the recording's own timestamp so the log lines up with the clock.
+</p>
+
+<script>
+(function(){
+"use strict";
+const $=id=>document.getElementById(id);
+const S={freq:100,thr:12,hold:15};
+let file=null, events=[], history=[], startMs=0, busy=false;
+
+/* ---------- shared DSP: CIC decimate to ~750 Hz, then Goertzel probes ---------- */
+function makeDetector(sr, freq, onBlock){
+  const dec=Math.max(1,Math.round(sr/750)), dsr=sr/dec;
+  const N=Math.round(dsr*0.7), hop=N>>1;
+  const stage=[0,0,0], hist=[new Float32Array(dec),new Float32Array(dec),new Float32Array(dec)];
+  const buf=new Float32Array(N), win=new Float32Array(N);
+  for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/N);
+  let hi=0, dcount=0, w=0, seen=0;
+  const tone=[], side=[];
+  for(let d=-2.5;d<2.6;d+=0.5) tone.push(freq+d);
+  for(let d=-26;d<-7.9;d+=1.5) side.push(freq+d);
+  for(let d=8;d<26.1;d+=1.5) side.push(freq+d);
+  const mag=f=>{
+    const om=2*Math.PI*f/dsr, k=2*Math.cos(om);
+    let s1=0,s2=0,s0;
+    for(let i=0;i<N;i++){ s0=buf[i]*win[i]+k*s1-s2; s2=s1; s1=s0; }
+    const re=s1-s2*Math.cos(om), im=s2*Math.sin(om);
+    return 4*Math.sqrt(re*re+im*im)/N;
+  };
+  const db=m=>20*Math.log10(Math.max(m,1e-12));
+  return function feed(ch){
+    for(let n=0;n<ch.length;n++){
+      let v=ch[n]; seen++;
+      for(let s=0;s<3;s++){ stage[s]+=v-hist[s][hi]; hist[s][hi]=v; v=stage[s]/dec; }
+      hi=(hi+1)%dec;
+      if(++dcount>=dec){
+        dcount=0; buf[w++]=v;
+        if(w>=N){
+          let t=-Infinity;
+          for(const f of tone){ const d=db(mag(f)); if(d>t) t=d; }
+          const s=side.map(f=>db(mag(f))).sort((a,b)=>a-b);
+          onBlock(seen/sr, t, s[s.length>>1]);
+          buf.copyWithin(0,hop); w=N-hop;
+        }
+      }
+    }
+  };
+}
+
+/* ---------- state machine over blocks ---------- */
+function makeCollector(){
+  let on=false, cand=0;
+  events=[]; history=[];
+  return function(tSec, toneDb, floorDb){
+    const wall = startMs + tSec*1000, snr = toneDb - floorDb;
+    const want = snr>=S.thr ? 1 : (snr<=S.thr-3 ? -1 : 0);
+    if(want!==0 && (want===1)!==on){
+      if(!cand) cand=wall;
+      if(wall-cand >= S.hold*1000){
+        const at=wall-S.hold*1000;
+        if(want===1){ events.push({start:at,peak:snr,sum:snr,n:1}); on=true; }
+        else { for(let i=events.length-1;i>=0;i--) if(!events[i].end){ events[i].end=at; break; } on=false; }
+        cand=0;
+      }
+    } else cand=0;
+    if(on){ const e=events[events.length-1]; if(e&&!e.end){ e.sum+=snr; e.n++; if(snr>e.peak) e.peak=snr; } }
+    if(!history.length || wall-history[history.length-1][0]>=5000) history.push([wall,Math.round(snr*10)/10]);
+  };
+}
+
+/* ---------- WAV: parse the header, then read the data chunk in slices ---------- */
+async function wavInfo(f){
+  const head=new DataView(await f.slice(0,4096).arrayBuffer());
+  const s=(o,n)=>{let r="";for(let i=0;i<n;i++) r+=String.fromCharCode(head.getUint8(o+i));return r;};
+  if(s(0,4)!=="RIFF"||s(8,4)!=="WAVE") return null;
+  let p=12, fmt=null, data=null;
+  while(p+8 <= head.byteLength){
+    const id=s(p,4), size=head.getUint32(p+4,true);
+    if(id==="fmt ") fmt={format:head.getUint16(p+8,true), ch:head.getUint16(p+10,true),
+                          sr:head.getUint32(p+12,true), bits:head.getUint16(p+22,true)};
+    if(id==="data"){ data={offset:p+8, size:Math.min(size, f.size-(p+8))}; break; }
+    p += 8 + size + (size&1);
+  }
+  return fmt&&data ? {fmt,data} : null;
+}
+
+function readFrames(dv, fmt, out){
+  const bytes=fmt.bits>>3, step=bytes*fmt.ch, frames=Math.floor(dv.byteLength/step);
+  for(let i=0;i<frames;i++){
+    const o=i*step; let v=0;
+    if(fmt.bits===16) v=dv.getInt16(o,true)/32768;
+    else if(fmt.bits===32 && fmt.format===3) v=dv.getFloat32(o,true);
+    else if(fmt.bits===32) v=dv.getInt32(o,true)/2147483648;
+    else if(fmt.bits===24) v=((dv.getUint8(o)|dv.getUint8(o+1)<<8|dv.getInt8(o+2)<<16))/8388608;
+    else if(fmt.bits===8) v=(dv.getUint8(o)-128)/128;
+    out[i]=v;
+  }
+  return frames;
+}
+
+async function analyse(){
+  if(busy||!file) return;
+  busy=true; $("go").disabled=true; $("err").hidden=true;
+  startMs = new Date($("startAt").value).getTime() || file.lastModified;
+  const collect = makeCollector();
+  const yield_ = ()=>new Promise(r=>setTimeout(r,0));
+
+  try{
+    const info = await wavInfo(file);
+    if(info){
+      const {fmt,data}=info;
+      if(![8,16,24,32].includes(fmt.bits)) throw new Error("Unsupported WAV bit depth.");
+      const feed = makeDetector(fmt.sr, S.freq, collect);
+      const step = fmt.ch*(fmt.bits>>3);
+      const chunk = Math.floor(4e6/step)*step;
+      const mono = new Float32Array(Math.floor(chunk/step));
+      const total = data.size;
+      const dur = total/step/fmt.sr;
+      $("status").textContent = `${fmt.sr} Hz, ${fmt.bits}-bit, ${fmt.ch===1?"mono":fmt.ch+" channels"}, ${fmtDur(dur*1000)}`;
+      for(let off=0; off<total; off+=chunk){
+        const n = Math.min(chunk, total-off);
+        const dv = new DataView(await file.slice(data.offset+off, data.offset+off+n).arrayBuffer());
+        const frames = readFrames(dv, fmt, mono);
+        feed(frames===mono.length ? mono : mono.subarray(0,frames));
+        $("prog").style.width = ((off+n)/total*100).toFixed(1)+"%";
+        render(); await yield_();
+      }
+    }else{
+      $("status").textContent = "Decoding — this holds the whole file in memory.";
+      await new Promise(r=>setTimeout(r,30));
+      const ac = new (window.AudioContext||window.webkitAudioContext)();
+      const audio = await ac.decodeAudioData(await file.arrayBuffer());
+      ac.close();
+      const ch = audio.getChannelData(0);
+      const feed = makeDetector(audio.sampleRate, S.freq, collect);
+      $("status").textContent = `${audio.sampleRate} Hz, ${fmtDur(audio.duration*1000)}`;
+      const step = audio.sampleRate*30;
+      for(let i=0;i<ch.length;i+=step){
+        feed(ch.subarray(i, Math.min(i+step, ch.length)));
+        $("prog").style.width = (Math.min(i+step,ch.length)/ch.length*100).toFixed(1)+"%";
+        render(); await yield_();
+      }
+    }
+    for(const e of events) if(!e.end) e.end = history.length ? history[history.length-1][0] : e.start;
+    $("prog").style.width="100%";
+    const total = events.reduce((a,e)=>a+(e.end-e.start),0);
+    $("status").textContent = `${events.length} periods, ${fmtDur(total)} of hum in total.`;
+    $("csvEvents").disabled=$("csvLevels").disabled = events.length===0;
+  }catch(err){
+    $("err").hidden=false;
+    $("err").textContent = "Couldn't read that file: "+err.message+" Try exporting it as WAV.";
+  }
+  render(); busy=false; $("go").disabled=false;
+}
+
+/* ---------- display ---------- */
+const fmtTime=t=>new Date(t).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+function fmtDur(ms){const s=Math.max(0,Math.round(ms/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60),r=s%60;
+  return h?`${h}h ${m}m`:m?`${m}m ${r}s`:`${r}s`;}
+
+function render(){
+  const c=$("tl"),dpr=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
+  c.width=w*dpr;c.height=h*dpr;
+  const g=c.getContext("2d");g.scale(dpr,dpr);
+  g.fillStyle="#151d2c";g.fillRect(0,0,w,h);
+  if(history.length>1){
+    const t0=history[0][0], t1=history[history.length-1][0], span=Math.max(t1-t0,60000), x=t=>(t-t0)/span*w;
+    g.strokeStyle="#243248";g.lineWidth=1;
+    const first=new Date(t0);first.setMinutes(0,0,0);
+    for(let t=first.getTime();t<=t1;t+=3600000){
+      if(t<t0)continue;
+      const px=Math.round(x(t))+.5;
+      g.beginPath();g.moveTo(px,0);g.lineTo(px,h);g.stroke();
+      g.fillStyle="#3c4a61";g.font="11px ui-sans-serif,system-ui,sans-serif";
+      g.fillText(new Date(t).getHours()+":00",px+4,h-6);
+    }
+    const top=10,bot=h-22,sc=v=>bot-Math.max(0,Math.min(1,v/40))*(bot-top);
+    g.strokeStyle="#8a5f1c";g.setLineDash([3,4]);
+    g.beginPath();g.moveTo(0,sc(S.thr));g.lineTo(w,sc(S.thr));g.stroke();g.setLineDash([]);
+    g.strokeStyle="#4f7f92";g.beginPath();
+    for(let i=0;i<history.length;i++){const px=x(history[i][0]),py=sc(history[i][1]);i?g.lineTo(px,py):g.moveTo(px,py);}
+    g.stroke();
+    for(const e of events){
+      const a=x(e.start),b=x(e.end||t1);
+      g.fillStyle="rgba(231,163,60,.30)";g.fillRect(a,top-6,Math.max(2,b-a),bot-top+6);
+      g.fillStyle="#e7a33c";g.fillRect(a,top-9,Math.max(2,b-a),3);
+    }
+    $("axL").textContent=fmtTime(t0);$("axR").textContent=fmtTime(t1);
+  }else{
+    g.fillStyle="#6f7f98";g.font="13px ui-sans-serif,system-ui,sans-serif";
+    g.fillText("The night's record appears here.",12,h/2);
+  }
+  const tb=$("log");tb.innerHTML="";
+  const rows=events.slice().reverse().slice(0,300);
+  $("empty").hidden=rows.length>0;
+  for(const e of rows){
+    const end=e.end||e.start,tr=document.createElement("tr");
+    tr.innerHTML=`<td>${fmtTime(e.start)}</td><td>${fmtTime(end)}</td>
+      <td class="dur">${fmtDur(end-e.start)}</td><td>${(e.sum/e.n).toFixed(0)} dB</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+/* ---------- export ---------- */
+function download(name,text){
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([text],{type:"text/csv"}));
+  a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+}
+const iso=t=>new Date(t).toISOString();
+$("csvEvents").onclick=()=>{
+  let s="kind,start_iso,end_iso,duration_seconds,mean_snr_db,peak_snr_db,watched_hz,threshold_db\n";
+  for(const e of events) s+=`hum,${iso(e.start)},${iso(e.end)},${((e.end-e.start)/1000).toFixed(0)},${(e.sum/e.n).toFixed(1)},${e.peak.toFixed(1)},${S.freq},${S.thr}\n`;
+  download("hum-log-from-recording.csv",s);
+};
+$("csvLevels").onclick=()=>{
+  let s="iso_time,snr_db\n";for(const h of history) s+=iso(h[0])+","+h[1]+"\n";
+  download("hum-levels-from-recording.csv",s);
+};
+
+$("file").onchange=e=>{
+  file=e.target.files[0]; if(!file) return;
+  $("go").disabled=false;
+  const d=new Date(file.lastModified);
+  d.setMinutes(d.getMinutes()-d.getTimezoneOffset());
+  $("startAt").value=d.toISOString().slice(0,19);
+  $("status").textContent=`${(file.size/1e6).toFixed(0)} MB loaded. Check the start time, then analyse.`;
+};
+$("go").onclick=analyse;
+$("freq").onchange=e=>S.freq=Math.max(25,Math.min(300,+e.target.value||100));
+$("thr").oninput=e=>{S.thr=+e.target.value;$("thrOut").textContent=S.thr+" dB";render();};
+$("hold").onchange=e=>S.hold=Math.max(2,+e.target.value||15);
+window.addEventListener("resize",render);
+render();
+})();
+</script>
+</body>
+</html>
