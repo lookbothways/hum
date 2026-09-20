@@ -152,11 +152,18 @@
   it didn't have.
 </p>
 
+<p class="note" style="border:0;padding-top:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+  <span id="ver"></span>
+  <button id="update" style="padding:4px 10px;font-size:12px">Check for update</button>
+  <span id="updmsg"></span>
+</p>
+
 <div class="waker" id="waker"></div>
 
 <script>
 (function(){
 "use strict";
+const VERSION="3.1", BUILT="2026-09-20";
 const K={ev:"humwatch.events", det:"humwatch.detail", min:"humwatch.minutes", st:"humwatch.settings", old:"humwatch.history"};
 const $=id=>document.getElementById(id);
 const load=(k,d)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):d;}catch(e){return d;}};
@@ -543,14 +550,16 @@ function download(name,text){
 }
 const iso=t=>new Date(t).toISOString();
 $("csvEvents").onclick=()=>{
-  let s="kind,start_iso,end_iso,duration_seconds,mean_snr_db,peak_snr_db,watched_hz,threshold_db\n";
+  let s="# Hum Watch v"+VERSION+" export "+new Date().toISOString()+"\n";
+  s+="kind,start_iso,end_iso,duration_seconds,mean_snr_db,peak_snr_db,watched_hz,threshold_db,app_version\n";
   for(const e of events){ const end=e.end||Date.now();
-    s += e.gap ? `gap,${iso(e.start)},${iso(end)},${((end-e.start)/1000).toFixed(0)},,,${S.freq},${S.thr}\n`
-               : `hum,${iso(e.start)},${iso(end)},${((end-e.start)/1000).toFixed(0)},${(e.sum/e.n).toFixed(1)},${e.peak.toFixed(1)},${S.freq},${S.thr}\n`; }
+    s += e.gap ? `gap,${iso(e.start)},${iso(end)},${((end-e.start)/1000).toFixed(0)},,,${S.freq},${S.thr},${VERSION}\n`
+               : `hum,${iso(e.start)},${iso(end)},${((end-e.start)/1000).toFixed(0)},${(e.sum/e.n).toFixed(1)},${e.peak.toFixed(1)},${S.freq},${S.thr},${VERSION}\n`; }
   download("hum-log-"+new Date().toISOString().slice(0,10)+".csv", s);
 };
 $("csvLevels").onclick=()=>{
-  let s="iso_minute,max_snr_db,mean_snr_db\n";
+  let s="# Hum Watch v"+VERSION+" export "+new Date().toISOString()+"\n";
+  s+="iso_minute,max_snr_db,mean_snr_db\n";
   for(const m of mins) s+=iso(m[0])+","+m[1]+","+m[2]+"\n";
   download("hum-levels-"+new Date().toISOString().slice(0,10)+".csv", s);
 };
@@ -582,7 +591,40 @@ window.addEventListener("pagehide",flush);
 let deferred=null;
 window.addEventListener("beforeinstallprompt", e=>{ e.preventDefault(); deferred=e; $("install").hidden=false; });
 $("install").onclick=async()=>{ if(!deferred) return; $("install").hidden=true; deferred.prompt(); deferred=null; };
-if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
+/* version, and a way to prove which copy is actually running */
+$("ver").textContent = "Hum Watch v"+VERSION+" · "+BUILT;
+let reg=null, waiting=null, reloading=false;
+function offerUpdate(w){
+  waiting=w;
+  $("updmsg").innerHTML='newer version ready — <a href="#" id="applyUpd" style="color:var(--sodium)">reload to use it</a>';
+  $("applyUpd").onclick=ev=>{ ev.preventDefault(); reloading=true; waiting.postMessage("skipWaiting"); };
+}
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.register("./sw.js",{updateViaCache:"none"}).then(r=>{
+    reg=r;
+    if(r.waiting && navigator.serviceWorker.controller) offerUpdate(r.waiting);
+    r.addEventListener("updatefound",()=>{
+      const nw=r.installing;
+      nw && nw.addEventListener("statechange",()=>{
+        if(nw.state==="installed" && navigator.serviceWorker.controller) offerUpdate(nw);
+      });
+    });
+    r.update().catch(()=>{});
+  }).catch(()=>{});
+  navigator.serviceWorker.addEventListener("controllerchange",()=>{ if(reloading) location.reload(); });
+  setInterval(()=>{ if(reg) reg.update().catch(()=>{}); }, 6*3600e3);
+}
+$("update").onclick=async()=>{
+  $("updmsg").textContent="checking…";
+  try{
+    if(reg){ await reg.update(); }
+    const res=await fetch("./index.html",{cache:"no-store"});
+    const txt=await res.text();
+    const m=txt.match(/VERSION="([\d.]+)"/);
+    if(m && m[1]!==VERSION && !waiting) $("updmsg").textContent="v"+m[1]+" is on the server — reload to pick it up.";
+    else if(!waiting) $("updmsg").textContent="up to date.";
+  }catch(e){ $("updmsg").textContent="couldn't reach the server."; }
+};
 
 renderLog(); paint();
 setInterval(()=>{ if(running && document.visibilityState==="visible") paint(); },1000);

@@ -79,9 +79,12 @@
   a computer. Set the start time from the recording's own timestamp so the log lines up with the clock.
 </p>
 
+<p class="note" style="border:0;padding-top:4px"><span id="ver"></span></p>
+
 <script>
 (function(){
 "use strict";
+const VERSION="3.1", BUILT="2026-09-20";
 const $=id=>document.getElementById(id);
 const S={freq:100,thr:12,hold:15};
 let file=null, events=[], history=[], startMs=0, busy=false;
@@ -287,8 +290,9 @@ function download(name,text){
 }
 const iso=t=>new Date(t).toISOString();
 $("csvEvents").onclick=()=>{
-  let s="kind,start_iso,end_iso,duration_seconds,mean_snr_db,peak_snr_db,watched_hz,threshold_db\n";
-  for(const e of events) s+=`hum,${iso(e.start)},${iso(e.end)},${((e.end-e.start)/1000).toFixed(0)},${(e.sum/e.n).toFixed(1)},${e.peak.toFixed(1)},${S.freq},${S.thr}\n`;
+  let s="# Hum Watch v"+VERSION+" export "+new Date().toISOString()+"\n";
+  s+="kind,start_iso,end_iso,duration_seconds,mean_snr_db,peak_snr_db,watched_hz,threshold_db,app_version\n";
+  for(const e of events) s+=`hum,${iso(e.start)},${iso(e.end)},${((e.end-e.start)/1000).toFixed(0)},${(e.sum/e.n).toFixed(1)},${e.peak.toFixed(1)},${S.freq},${S.thr},${VERSION}\n`;
   download("hum-log-from-recording.csv",s);
 };
 $("csvLevels").onclick=()=>{
@@ -308,6 +312,7 @@ $("go").onclick=analyse;
 $("freq").onchange=e=>S.freq=Math.max(25,Math.min(300,+e.target.value||100));
 $("thr").oninput=e=>{S.thr=+e.target.value;$("thrOut").textContent=S.thr+" dB";render();};
 $("hold").onchange=e=>S.hold=Math.max(2,+e.target.value||15);
+$("ver").textContent="Hum Watch v"+VERSION+" · "+BUILT;
 window.addEventListener("resize",render);
 render();
 })();
